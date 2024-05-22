@@ -74,6 +74,18 @@ impl LdapDirectory {
                     Credentials::OAuthBearer { token } => (token, token),
                     Credentials::XOauth2 { username, secret } => (username, secret),
                 };
+
+                // Attempt to
+                let username = email_to_username(&self, username).await? else {
+                    tracing::debug!(
+                        context = "bindin",
+                        event = "email_not_found",
+                        protocol = "ldap",
+                        account = username,
+                        "No username could be found for the provided email";
+                    );
+                };
+
                 account_name = username.to_string();
 
                 if let Some(auth_bind) = &self.auth_bind {
@@ -171,6 +183,31 @@ impl LdapDirectory {
             principal.member_of.clear();
             Ok(Some(principal.into()))
         }
+    }
+
+    pub async fn email_to_username(&self, address: &str) -> crate::Option<String> {
+        let results = match self
+            .pool
+            .get()
+            .await?
+            .search(
+                &self.mappings.base_dn,
+                Scope::Subtree,
+                &self.mappings.filter_email.build(address.as_ref()),
+                &self.mappings.attr_name,
+            )
+            .await?
+            .success()
+        {
+            Ok((rs, _res)) => rs,
+            Err(_) => return None,
+        };
+
+        let [ entry ] = results.as_slice() else {
+            return None;
+        };
+
+        return SearchEntry::construct(entry).attrs.get(&self.mappings.attr_name).and_then(|v| v.first().map(|v| v.to_string()));
     }
 
     pub async fn email_to_ids(&self, address: &str) -> crate::Result<Vec<u32>> {
@@ -368,7 +405,9 @@ impl LdapMappings {
                         "posixaccount" | "individual" | "person" | "inetorgperson" => {
                             principal.typ = Type::Individual
                         }
-                        "posixgroup" | "groupofuniquenames" | "group" => principal.typ = Type::Group,
+                        "posixgroup" | "groupofuniquenames" | "group" => {
+                            principal.typ = Type::Group
+                        }
                         _ => continue,
                     }
                     break;
